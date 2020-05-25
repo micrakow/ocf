@@ -8,6 +8,7 @@
 
 #include "../ocf_request.h"
 #include "../engine/cache_engine.h"
+#include "../engine/engine_common.h"
 #include "../metadata/metadata_partition.h"
 
 void ocf_part_init(struct ocf_cache *cache);
@@ -61,7 +62,22 @@ static inline void ocf_part_sort(struct ocf_cache *cache)
 	ocf_lst_sort(&cache->lst_part);
 }
 
-static inline ocf_cache_mode_t ocf_part_get_cache_mode(struct ocf_cache *cache,
+static inline bool ocf_part_occ_check_limit(struct ocf_request *req)
+{
+	ocf_cache_t cache = req->cache;
+	uint32_t clines_needed = ocf_engine_unmapped_count(req);
+	uint32_t max = req->cache->user_parts[req->part_id].config->max_size;
+	uint32_t curr_cached = env_atomic_read(
+				&cache->user_parts[req->part_id].runtime->valid_cnt);
+	uint32_t clines_available = max ? max - curr_cached : 0;
+
+	if (clines_needed > clines_available)
+		return true;
+	else
+		return false;
+}
+
+static inline ocf_cache_mode_t ocf_part_get_cache_mode(ocf_cache_t cache,
 		ocf_part_id_t part_id)
 {
 	if (part_id < OCF_IO_CLASS_MAX)

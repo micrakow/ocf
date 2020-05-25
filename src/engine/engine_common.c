@@ -14,6 +14,7 @@
 #include "../utils/utils_cache_line.h"
 #include "../ocf_request.h"
 #include "../utils/utils_cleaner.h"
+#include "../utils/utils_part.h"
 #include "../metadata/metadata.h"
 #include "../eviction/eviction.h"
 #include "../promotion/promotion.h"
@@ -464,23 +465,13 @@ int ocf_engine_prepare_clines(struct ocf_request *req,
 	if (mapped || !promote) {
 		/* Will not attempt mapping - release hash bucket lock */
 		ocf_req_hash_unlock_rd(req);
-	} else {
-		/* Need to map (potentially evict) cachelines. Mapping must be
-		 * performed holding (at least) hash-bucket write lock */
-		ocf_req_hash_lock_upgrade(req);
-		ocf_engine_map(req);
-		if (!req->info.mapping_error)
-			lock = lock_clines(req, engine_cbs);
-		ocf_req_hash_unlock_wr(req);
-
-		if (req->info.mapping_error) {
-			/* Not mapped - evict cachelines under global exclusive
-			 * lock*/
+	} else if (ocf_part_occ_check_limit(req)) {
+			/* Partition reaches its max occupnacy, some cachelines
+			 * must be evcited first */
+			req->part_evict = true;
+			ocf_req_hash_unlock_rd(req);
 			ocf_metadata_start_exclusive_access(metadata_lock);
 
-			/* Now there is exclusive access for metadata. May
-			 * traverse once again and evict cachelines if needed.
-			 */
 			if (ocf_engine_evict(req) == LOOKUP_MAPPED)
 				ocf_engine_map(req);
 
@@ -488,7 +479,31 @@ int ocf_engine_prepare_clines(struct ocf_request *req,
 				lock = lock_clines(req, engine_cbs);
 
 			ocf_metadata_end_exclusive_access(metadata_lock);
-		}
+	} else {
+			/* Need to map (potentially evict) cachelines. Mapping must be
+			 * performed holding (at least) hash-bucket write lock */
+			ocf_req_hash_lock_upgrade(req);
+			ocf_engine_map(req);
+			if (!req->info.mapping_error)
+				lock = lock_clines(req, engine_cbs);
+			ocf_req_hash_unlock_wr(req);
+
+			if (req->info.mapping_error) {
+				/* Not mapped - evict cachelines under global exclusive
+				 * lock*/
+				ocf_metadata_start_exclusive_access(metadata_lock);
+
+				/* Now there is exclusive access for metadata. May
+				 * traverse once again and evict cachelines if needed.
+				 */
+				if (ocf_engine_evict(req) == LOOKUP_MAPPED)
+					ocf_engine_map(req);
+
+				if (!req->info.mapping_error)
+					lock = lock_clines(req, engine_cbs);
+
+				ocf_metadata_end_exclusive_access(metadata_lock);
+			}
 	}
 
 
